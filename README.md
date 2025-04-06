@@ -58,7 +58,7 @@ match-time-slot/
 └── tests/                        # Test scripts
     ├── target_sample_test.py     # Pre-defined test cases
     ├── random_sample_test.py     # Customizable random tests
-    └── reward_message_test.py    # Real-world message simulation
+    └── realword_message_test.py    # Real-world message simulation
 ```
 
 ---
