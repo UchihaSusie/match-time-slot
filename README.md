@@ -1,6 +1,7 @@
 # Interview Time Slot Matching System
 
-![Open In Colab](https://colab.research.google.com/github/UchihaSusie/match-time-slot/blob/main/run_in_colab.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/UchihaSusie/match-time-slot/blob/main/run_in_colab.ipynb)
+
 
 A sophisticated interview scheduling system that automatically coordinates interview times between candidates and recruiters across different time zones using multiple scheduling algorithms.
 
