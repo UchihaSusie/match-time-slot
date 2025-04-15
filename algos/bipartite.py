@@ -1,7 +1,62 @@
 from collections import defaultdict
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from utils.time_paraser import parse_multi_day_slots
 
+# Optional: Map common timezone abbreviations to IANA
+TIMEZONE_MAP = {
+    "PST": "America/Los_Angeles",
+    "EST": "America/New_York",
+    "CST": "America/Chicago",
+    "MST": "America/Denver"
+}
+
+def resolve_timezone(tz_str):
+    """
+    Resolves a timezone string to a ZoneInfo object.
+    Supports common abbreviations by mapping them to full IANA names.
+    """
+    return ZoneInfo(TIMEZONE_MAP.get(tz_str, tz_str))
+
+def parse_multi_day_slots(availability, slot_length_minutes, timezone_str):
+    """
+    Converts availability ranges into discrete time slots of fixed length,
+    filtering out weekends and ensuring the slots fall within 9am–6pm in the local time zone.
+
+    Args:
+        availability: list of strings like "2025-04-01 09:00-10:00"
+        slot_length_minutes: duration of each interview slot (e.g., 30)
+        timezone_str: time zone (e.g., "EST", "PST", "America/New_York")
+
+    Returns:
+        A set of timezone-aware datetime objects, each representing a slot start time
+    """
+    tz = resolve_timezone(timezone_str)
+    time_slots = set()
+
+    for time_range in availability:
+        # Split "2025-04-01 09:00-10:00" into parts
+        date_str, time_str = time_range.split()
+        start_str, end_str = time_str.split("-")
+
+        # Convert to timezone-aware datetime objects
+        start = datetime.strptime(f"{date_str} {start_str}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
+        end = datetime.strptime(f"{date_str} {end_str}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
+
+        # Skip weekends
+        if start.weekday() >= 5:
+            continue
+        
+        # Clamp slots to working hours: 9am to 6pm
+        work_start = start.replace(hour=9, minute=0)
+        work_end = start.replace(hour=18, minute=0)
+        start = max(start, work_start)
+        end = min(end, work_end)
+
+        # Generate discrete time slots (e.g., every 30 minutes)
+        while start + timedelta(minutes=slot_length_minutes) <= end:
+            time_slots.add(start)
+            start += timedelta(minutes=slot_length_minutes)
+    return time_slots
 
 def schedule_interviews(
     candidates: dict[str, dict],
@@ -36,102 +91,45 @@ def schedule_interviews(
         for rec, data in recruiters.items()
     }
 
-    candidate_slots_utc = {}
-    utc_to_original_map = {}
-   
-    for cand, slots in candidate_slots.items():
-       candidate_slots_utc[cand] = set()
-       for slot in slots:
-           # Convert to UTC time
-           slot_utc = slot.astimezone(ZoneInfo("UTC"))
-           candidate_slots_utc[cand].add(slot_utc)
-           # Record mapping from UTC -> original time
-           utc_to_original_map[(cand, slot_utc)] = slot
-   
-   # Similarly process the recruiter's time slots
-    recruiter_slots_utc = {}
-    for rec, slots in recruiter_slots.items():
-       recruiter_slots_utc[rec] = set()
-       for slot in slots:
-           slot_utc = slot.astimezone(ZoneInfo("UTC"))
-           recruiter_slots_utc[rec].add(slot_utc)
+    slot_key_to_info = {}
+    adj = defaultdict(list)
+    for rec, r_slots in recruiter_slots.items():
+        for slot in r_slots:
+            key = f"{rec}_{slot.isoformat()}"
+            slot_key_to_info[key] = (rec, slot)
 
-    # # Build candidate-recruiter-slot match list (only where slots overlap)
-    # edges = []
-    # for cand, c_slots in candidate_slots.items():
-    #     for rec, r_slots in recruiter_slots.items():
-    #         for slot in c_slots & r_slots:
-    #             edges.append((cand, rec, slot))
+    for cand, c_slots in candidate_slots.items():
+        for key, (rec, slot) in slot_key_to_info.items():
+            if slot in c_slots:
+                adj[cand].append(key)
 
-      # Connect candidates to recruiters in UTC timezone
-    edges = []
-    for cand, c_slots_utc in candidate_slots_utc.items():
-       for rec, r_slots_utc in recruiter_slots_utc.items():
-           # Find commonly available times in UTC
-           common_slots_utc = c_slots_utc & r_slots_utc
-           
-           for slot_utc in common_slots_utc:
-               # Use candidate's original timezone time as the result
-               original_slot = utc_to_original_map[(cand, slot_utc)]
-               edges.append((cand, rec, original_slot))
+    def dfs(cand, visited, match):
+        for slot_key in adj[cand]:
+            if slot_key in visited:
+                continue
+            visited.add(slot_key)
+            if slot_key not in match or dfs(match[slot_key], visited, match):
+                match[slot_key] = cand
+                return True
+        return False
 
-    # Schedule interviews using first-come-first-serve on sorted slots
+    match = {}
+    candidate_match_count = defaultdict(int)
+    recruiter_match_count = defaultdict(int)
+
+    for cand in candidates:
+        if candidate_match_count[cand] >= max_interviews_per_candidate:
+            continue
+        success = dfs(cand, set(), match)
+        if success:
+            candidate_match_count[cand] += 1
+
     scheduled = []
-    candidate_counts = defaultdict(int)
-    recruiter_counts = defaultdict(int)
-    used_slots = set()
+    for slot_key, cand in match.items():
+        rec, slot = slot_key_to_info[slot_key]
+        if recruiter_match_count[rec] < max_interviews_per_recruiter:
+            slot_str = slot.astimezone(resolve_timezone(recruiters[rec]["timezone"])).strftime("%Y-%m-%d %H:%M %Z")
+            scheduled.append([cand, rec, slot_str])
+            recruiter_match_count[rec] += 1
 
-    for cand, rec, slot in sorted(edges, key=lambda x: x[2]):
-        if (
-            candidate_counts[cand] < max_interviews_per_candidate and
-            recruiter_counts[rec] < max_interviews_per_recruiter and
-            (cand, slot) not in used_slots and
-            (rec, slot) not in used_slots
-        ):
-            scheduled.append([cand, rec, slot.strftime("%Y-%m-%d %H:%M %Z")])
-            candidate_counts[cand] += 1
-            recruiter_counts[rec] += 1
-            used_slots.add((cand, slot))
-            used_slots.add((rec, slot))
-
-    return scheduled
-
-# === Example usage ===
-if __name__ == "__main__":
-    candidates = {
-        "Alice": {
-            "availability": ["2025-04-01 09:00-10:00", "2025-04-01 13:00-14:00"],
-            "timezone": "EST"
-        },
-        "Bob": {
-            "availability": ["2025-04-01 09:30-10:30"],
-            "timezone": "EST"
-        },
-        "Charlie": {
-            "availability": ["2025-04-01 13:00-14:00"],
-            "timezone": "EST"
-        }
-    }
-
-    recruiters = {
-        "R1": {
-            "availability": ["2025-04-01 09:00-10:00"],
-            "timezone": "EST"
-        },
-        "R2": {
-            "availability": ["2025-04-01 13:00-14:00", "2025-04-01 09:30-10:30"],
-            "timezone": "EST"
-        }
-    }
-
-    result = schedule_interviews(
-        candidates,
-        recruiters,
-        slot_length_minutes=30,
-        max_interviews_per_candidate=2,
-        max_interviews_per_recruiter=2
-    )
-
-    print("Scheduled interviews:")
-    for interview in result:
-        print(interview)
+    return sorted(scheduled, key=lambda x: x[2])
